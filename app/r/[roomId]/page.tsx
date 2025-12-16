@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams, useSearchParams, useRouter } from "next/navigation";
 import {
   ref,
   onValue,
@@ -16,13 +16,27 @@ import { useAuth } from "@/lib/useAuth";
 
 type Slot = null | { uid: string; name: string; ready: boolean };
 
-// ✅ ทำให้รองรับห้องเก่า (บาง field อาจยังไม่มี)
+// รองรับห้องเก่า
 type Room = {
   createdAt?: number;
   status?: "lobby" | "playing";
   hostUid?: string;
   slots?: Record<"1" | "2" | "3" | "4", Slot>;
-  game?: { phase: "lobby" | "playing"; startedAt: number | null };
+  game?: {
+    phase?: "lobby" | "playing";
+    startedAt?: number | null;
+    // engine state (optional)
+    turnUid?: string | null;
+    step?: "draw" | "discard";
+    headCardId?: string | null;
+    stock?: unknown[];
+    discard?: unknown[];
+    tableMelds?: unknown[];
+    players?: Record<string, unknown>;
+    cardOrigins?: Record<string, unknown>;
+    winnerUid?: string | null;
+    endedAt?: number | null;
+  };
 };
 
 const EMPTY_SLOTS: Record<"1" | "2" | "3" | "4", Slot> = {
@@ -35,6 +49,7 @@ const EMPTY_SLOTS: Record<"1" | "2" | "3" | "4", Slot> = {
 export default function RoomPage() {
   const { roomId } = useParams<{ roomId: string }>();
   const search = useSearchParams();
+  const router = useRouter();
   const { uid, loading } = useAuth();
 
   const name = useMemo(() => search.get("name") || "Player", [search]);
@@ -52,23 +67,46 @@ export default function RoomPage() {
     return () => unsub();
   }, [roomRef]);
 
-  // derived safe fields
+  // safe normalize
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const status: "lobby" | "playing" = (room?.status ?? "lobby") as any;
-  const game = room?.game ?? {
-    phase: "lobby" as const,
-    startedAt: null as number | null,
-  };
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const phase: "lobby" | "playing" = (game.phase ?? "lobby") as any;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const slots: Record<"1" | "2" | "3" | "4", Slot> = {
-    ...EMPTY_SLOTS,
-    ...(room?.slots ?? {}),
+  const phase: "lobby" | "playing" =
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  } as any;
+    ((room?.game?.phase ?? "lobby") as any) ?? "lobby";
+  const slots: Record<"1" | "2" | "3" | "4", Slot> = useMemo(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const raw: any = room?.slots ?? {};
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const s: any = { ...EMPTY_SLOTS };
+    s["1"] = raw["1"] ?? raw[1] ?? null;
+    s["2"] = raw["2"] ?? raw[2] ?? null;
+    s["3"] = raw["3"] ?? raw[3] ?? null;
+    s["4"] = raw["4"] ?? raw[4] ?? null;
 
-  // ✅ auto migrate เติม schema ให้ห้องเก่า
+    (["1", "2", "3", "4"] as const).forEach((k) => {
+      const v = s[k];
+      const ok =
+        v &&
+        typeof v === "object" &&
+        typeof v.uid === "string" &&
+        typeof v.name === "string" &&
+        typeof v.ready === "boolean";
+      s[k] = ok ? (v as Slot) : null;
+    });
+
+    return s as Record<"1" | "2" | "3" | "4", Slot>;
+  }, [room?.slots]);
+
+  // ✅ redirect all players to /play when phase=playing
+  useEffect(() => {
+    if (!room) return;
+    if (phase !== "playing") return;
+
+    const qs = new URLSearchParams({ name }).toString();
+    router.replace(`/r/${roomId}/play?${qs}`);
+  }, [phase, room, roomId, name, router]);
+
+  // ✅ auto migrate for old rooms
   useEffect(() => {
     if (!room) return;
 
@@ -80,7 +118,7 @@ export default function RoomPage() {
     if (!needSlots && !needGame && !needStatus && !needCreatedAt) return;
 
     update(ref(db, `rooms/${roomId}`), {
-      slots: room.slots ?? { 1: null, 2: null, 3: null, 4: null },
+      slots: room.slots ?? { "1": null, "2": null, "3": null, "4": null },
       game: room.game ?? { phase: "lobby", startedAt: null },
       status: room.status ?? "lobby",
       createdAt: room.createdAt ?? Date.now(),
@@ -117,7 +155,8 @@ export default function RoomPage() {
     if (!uid || !mySlot) return;
 
     const slotRef = ref(db, `rooms/${roomId}/slots/${mySlot}`);
-    await runTransaction(slotRef, (current) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await runTransaction(slotRef, (current: any) => {
       if (current?.uid === uid) return null;
       return current;
     });
@@ -129,15 +168,13 @@ export default function RoomPage() {
     if (!uid) return;
     if (status !== "lobby") return alert("Game already started.");
 
-    // ถ้าอยู่ slot อื่นอยู่แล้ว -> ปล่อยก่อน
-    if (mySlot && mySlot !== slot) {
-      await leaveSlot();
-    }
+    if (mySlot && mySlot !== slot) await leaveSlot();
 
     const slotRef = ref(db, `rooms/${roomId}/slots/${slot}`);
-    const result = await runTransaction(slotRef, (current) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await runTransaction(slotRef, (current: any) => {
       if (current === null) return { uid, name, ready: false };
-      if (current?.uid === uid) return current; // allow refresh
+      if (current?.uid === uid) return current; // refresh ok
       return; // abort
     });
 
@@ -151,16 +188,16 @@ export default function RoomPage() {
     if (status !== "lobby") return;
 
     const slotRef = ref(db, `rooms/${roomId}/slots/${mySlot}`);
-    await runTransaction(slotRef, (current) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await runTransaction(slotRef, (current: any) => {
       if (!current || current.uid !== uid) return current;
       return { ...current, ready: !current.ready };
     });
   };
 
-  // helpers for start condition (2-4 people)
   const currentPlayers = useMemo(() => {
     return [slots["1"], slots["2"], slots["3"], slots["4"]].filter(
-      (x) => x !== null
+      Boolean
     ) as NonNullable<Slot>[];
   }, [slots]);
 
@@ -169,6 +206,7 @@ export default function RoomPage() {
     playerCount > 0 && currentPlayers.every((p) => p.ready === true);
   const iAmSlot1 = slots["1"]?.uid === uid;
 
+  // ✅ ตาม flow เราเริ่มเกมเมื่อพร้อม 2–4 คนและ ready ครบ
   const canStart =
     status === "lobby" &&
     phase === "lobby" &&
@@ -178,70 +216,44 @@ export default function RoomPage() {
 
   const startGameBySlot1 = async () => {
     if (!uid) return;
-    if (!iAmSlot1) {
-      return alert("Start ได้เฉพาะ Player 1 เท่านั้น");
-    }
-    if (!canStart) {
-      return alert(
-        "Start ไม่ได้: ต้องมี 2–4 คน และทุกคนที่อยู่ในห้องต้อง Ready ครบ"
-      );
-    }
+    if (!iAmSlot1) return alert("Start ได้เฉพาะ Player 1 เท่านั้น");
+    if (!canStart)
+      return alert("Start ไม่ได้: ต้องมี 2–4 คน และทุกคน Ready ครบ");
 
-    // re-check from server snapshot (กัน race)
+    // re-check from server (กัน race)
     const snap = await get(roomRef);
     const latest = (snap.val() as Room) ?? null;
     if (!latest) return;
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const normalizeSlots = (raw: any): Record<"1" | "2" | "3" | "4", Slot> => {
-      // raw อาจเป็น undefined / object ไม่ครบ key / หรือเพี้ยน
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const s = { ...EMPTY_SLOTS } as Record<"1" | "2" | "3" | "4", any>;
-
-      if (raw && typeof raw === "object") {
-        // รองรับทั้ง key เป็น "1" หรือ 1
-        s["1"] = raw["1"] ?? raw[1] ?? null;
-        s["2"] = raw["2"] ?? raw[2] ?? null;
-        s["3"] = raw["3"] ?? raw[3] ?? null;
-        s["4"] = raw["4"] ?? raw[4] ?? null;
-      }
-
-      // sanitize: ถ้าไม่ใช่ object ที่มี uid/name/ready ก็ให้เป็น null
-      (["1", "2", "3", "4"] as const).forEach((k) => {
-        const v = s[k];
-        const ok =
-          v &&
-          typeof v === "object" &&
-          typeof v.uid === "string" &&
-          typeof v.name === "string" &&
-          typeof v.ready === "boolean";
-        s[k] = ok ? (v as Slot) : null;
-      });
-
-      return s as Record<"1" | "2" | "3" | "4", Slot>;
+    const raw: any = latest.slots ?? {};
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const latestSlots: any = {
+      "1": raw["1"] ?? raw[1] ?? null,
+      "2": raw["2"] ?? raw[2] ?? null,
+      "3": raw["3"] ?? raw[3] ?? null,
+      "4": raw["4"] ?? raw[4] ?? null,
     };
-
-    const latestSlots = normalizeSlots(latest.slots);
 
     const latestPlayers = [
       latestSlots["1"],
       latestSlots["2"],
       latestSlots["3"],
       latestSlots["4"],
-    ].filter(
-      (p): p is NonNullable<Slot> => !!p && typeof p.ready === "boolean"
-    );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ].filter((p: any) => p && typeof p.ready === "boolean");
 
     const latestCount = latestPlayers.length;
     const latestEveryoneReady =
-      latestCount > 0 && latestPlayers.every((p) => p.ready === true);
-
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      latestCount > 0 && latestPlayers.every((p: any) => p.ready === true);
     const latestStatus = (latest.status ?? "lobby") as "lobby" | "playing";
     const latestPhase = (latest.game?.phase ?? "lobby") as "lobby" | "playing";
     const latestSlot1Uid = latestSlots["1"]?.uid;
 
     if (latestSlot1Uid !== uid)
       return alert("Start ได้เฉพาะ Player 1 เท่านั้น");
+
     if (
       !(
         latestStatus === "lobby" &&
@@ -251,19 +263,27 @@ export default function RoomPage() {
         latestEveryoneReady
       )
     ) {
-      return alert(
-        "Start ไม่ได้: ต้องมี 2–4 คน และทุกคนที่อยู่ในห้องต้อง Ready ครบ"
-      );
+      return alert("Start ไม่ได้: ต้องมี 2–4 คน และทุกคน Ready ครบ");
     }
 
-    // กัน start ซ้อน
-    const gameRef = ref(db, `rooms/${roomId}/game`);
-    await runTransaction(gameRef, (g) => {
-      if (!g || g.phase !== "lobby") return g;
-      return { ...g, phase: "playing", startedAt: Date.now() };
+    // ✅ init engine state (แจก/สับไพ่จริงจะไปทำในหน้า /play แบบ transaction)
+    await update(ref(db, `rooms/${roomId}`), {
+      status: "playing",
+      game: {
+        phase: "playing",
+        startedAt: Date.now(),
+        turnUid: latestSlot1Uid ?? null,
+        step: "draw",
+        headCardId: null,
+        stock: [],
+        discard: [],
+        tableMelds: [],
+        players: {},
+        cardOrigins: {},
+        winnerUid: null,
+        endedAt: null,
+      },
     });
-
-    await update(ref(db, `rooms/${roomId}`), { status: "playing" });
   };
 
   const renderSlot = (slotNo: 1 | 2 | 3 | 4) => {
@@ -361,7 +381,6 @@ export default function RoomPage() {
             {myReady ? "Unready" : "Ready"}
           </button>
 
-          {/* ✅ Start button เฉพาะ Player 1 */}
           {iAmSlot1 && status === "lobby" && (
             <button onClick={startGameBySlot1} disabled={!canStart}>
               Start (Player 1 only)
@@ -369,23 +388,9 @@ export default function RoomPage() {
           )}
 
           <span style={{ color: "#666" }}>
-            เงื่อนไข: ต้องมี 2–4 คน และทุกคนที่อยู่ในห้องต้อง Ready —
-            เริ่มได้เฉพาะ Player 1
+            เงื่อนไข: 2–4 คน และทุกคน Ready — เริ่มได้เฉพาะ Player 1
           </span>
         </div>
-
-        {phase === "playing" && (
-          <div
-            style={{
-              marginTop: 12,
-              padding: 12,
-              borderRadius: 12,
-              background: "#f6f6f6",
-            }}
-          >
-            🎮 Game started! (dummy) — ต่อไปค่อยใส่ gameplay จริงได้เลย
-          </div>
-        )}
       </div>
     </main>
   );
