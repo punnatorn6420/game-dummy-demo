@@ -192,16 +192,46 @@ export default function RoomPage() {
     const latest = (snap.val() as Room) ?? null;
     if (!latest) return;
 
-    const latestSlots = (latest.slots ?? EMPTY_SLOTS) as Record<
-      "1" | "2" | "3" | "4",
-      Slot
-    >;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const normalizeSlots = (raw: any): Record<"1" | "2" | "3" | "4", Slot> => {
+      // raw อาจเป็น undefined / object ไม่ครบ key / หรือเพี้ยน
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const s = { ...EMPTY_SLOTS } as Record<"1" | "2" | "3" | "4", any>;
+
+      if (raw && typeof raw === "object") {
+        // รองรับทั้ง key เป็น "1" หรือ 1
+        s["1"] = raw["1"] ?? raw[1] ?? null;
+        s["2"] = raw["2"] ?? raw[2] ?? null;
+        s["3"] = raw["3"] ?? raw[3] ?? null;
+        s["4"] = raw["4"] ?? raw[4] ?? null;
+      }
+
+      // sanitize: ถ้าไม่ใช่ object ที่มี uid/name/ready ก็ให้เป็น null
+      (["1", "2", "3", "4"] as const).forEach((k) => {
+        const v = s[k];
+        const ok =
+          v &&
+          typeof v === "object" &&
+          typeof v.uid === "string" &&
+          typeof v.name === "string" &&
+          typeof v.ready === "boolean";
+        s[k] = ok ? (v as Slot) : null;
+      });
+
+      return s as Record<"1" | "2" | "3" | "4", Slot>;
+    };
+
+    const latestSlots = normalizeSlots(latest.slots);
+
     const latestPlayers = [
       latestSlots["1"],
       latestSlots["2"],
       latestSlots["3"],
       latestSlots["4"],
-    ].filter((x) => x !== null) as NonNullable<Slot>[];
+    ].filter(
+      (p): p is NonNullable<Slot> => !!p && typeof p.ready === "boolean"
+    );
+
     const latestCount = latestPlayers.length;
     const latestEveryoneReady =
       latestCount > 0 && latestPlayers.every((p) => p.ready === true);
