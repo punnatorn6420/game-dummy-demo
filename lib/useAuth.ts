@@ -9,14 +9,24 @@ export function useAuth() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (user) => {
-      if (!user) {
-        await signInAnonymously(auth);
-        return;
-      }
-      setUid(user.uid);
+    // ✅ กันตอน build/SSR หรือ auth ยังไม่พร้อม
+    if (!auth) {
       setLoading(false);
+      return;
+    }
+
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      try {
+        if (!user) {
+          await signInAnonymously(auth);
+          return;
+        }
+        setUid(user.uid);
+      } finally {
+        setLoading(false);
+      }
     });
+
     return () => unsub();
   }, []);
 

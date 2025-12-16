@@ -1,6 +1,7 @@
+// lib/firebase.ts
 import { initializeApp, getApps } from "firebase/app";
-import { getDatabase } from "firebase/database";
 import { getAuth } from "firebase/auth";
+import { getDatabase } from "firebase/database";
 
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY!,
@@ -10,7 +11,11 @@ const firebaseConfig = {
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID!,
 };
 
-const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
+const isBrowser = typeof window !== "undefined";
 
-export const db = getDatabase(app);
-export const auth = getAuth(app);
+export const app = isBrowser
+  ? getApps()[0] ?? initializeApp(firebaseConfig)
+  : null;
+
+export const auth = app ? getAuth(app) : (null as any);
+export const db = app ? getDatabase(app) : (null as any);
