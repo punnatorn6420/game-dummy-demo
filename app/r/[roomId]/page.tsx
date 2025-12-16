@@ -61,9 +61,12 @@ export default function RoomPage() {
   };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const phase: "lobby" | "playing" = (game.phase ?? "lobby") as any;
-  const slots: Record<"1" | "2" | "3" | "4", Slot> = (room?.slots ??
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const slots: Record<"1" | "2" | "3" | "4", Slot> = {
+    ...EMPTY_SLOTS,
+    ...(room?.slots ?? {}),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    EMPTY_SLOTS) as any;
+  } as any;
 
   // ✅ auto migrate เติม schema ให้ห้องเก่า
   useEffect(() => {
